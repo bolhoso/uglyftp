@@ -1,5 +1,7 @@
 package com.bubbleftp;
 
+import com.bubbleftp.exception.CommandMissingParamsException;
+
 import java.io.*;
 import java.net.Socket;
 import java.util.StringTokenizer;
@@ -20,35 +22,35 @@ public class ClientHandler implements Runnable {
     private static final String COMMAND_LIST = "LIST";
     private static final String COMMAND_TYPE = "TYPE";
     private static final String COMMAND_RETR = "RETR";
-    
+
     private static final int STATUS_USER_OK = 331;
     private static final int STATUS_PASS_OK = 230;
 
     private Socket clientSocket;
     private PrintWriter out;
     private BufferedReader in;
-    private boolean finished = false;
-
-    private LoginHandler loginHandler;
-
-    private File cwd;
 
     private Socket dataConnectionSocket;
     private boolean dataConnectionSet;
     private String dataConnIp;
     private int dataConnPort;
 
+    private boolean finished = false;
+
+    private LoginHandler loginHandler;
+    private FileManager fileManager;
+
     public ClientHandler(Socket socket) throws IOException {
         clientSocket = socket;
         out = new PrintWriter(clientSocket.getOutputStream(), true);
         in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-        cwd = new File(".");
 
         loginHandler = new LoginHandler();
+        fileManager = new FileManager();
     }
 
-    public void sayHello() {
-        write(STATUS_OK, "Bubble 0.1 ftp ready.");
+    private void sayHello() {
+        write(STATUS_OK, "Bubble FTP 0.1 ready.");
     }
 
     private void write(int code, String output) {
@@ -79,7 +81,9 @@ public class ClientHandler implements Runnable {
         return new String[]{""};
     }
 
-    public void commandLoop() {
+    private void commandLoop() {
+        sayHello();
+
         while (!finished) {
             try {
                 String[] command = readCommand();
@@ -107,13 +111,12 @@ public class ClientHandler implements Runnable {
 
 
                     case COMMAND_CWD:
-                        String newDirectory = command[1];
-                        cwd = new File(newDirectory);
-                        write(250, "OK");
+                        validateCommandWithParam(command);
+                        handleCwd(command[1]);
                         break;
 
                     case COMMAND_PWD:
-                        write(257, cwd.getCanonicalPath() + " is the current working directory.");
+                        handlePwd();
                         break;
 
                     case COMMAND_PORT:
@@ -121,9 +124,9 @@ public class ClientHandler implements Runnable {
                         break;
 
                     case COMMAND_LIST:
-                        initiateDataConnection();
-                        sendFileList();
+                        handlListFiles();
                         break;
+
                     case COMMAND_TYPE:
                     case COMMAND_RETR:
                     default:
@@ -135,18 +138,45 @@ public class ClientHandler implements Runnable {
                         break;
                 }
 
+            } catch (CommandMissingParamsException e) {
+                write(STATUS_NOT_IMPLEMENTED, "Command missing parameters");
             } catch (IOException e) {
-                write(STATUS_NOT_IMPLEMENTED, "Error processing command");
+                write(STATUS_NOT_IMPLEMENTED, "Fatal error, aborting connection");
 
                 e.printStackTrace();
                 finished = true;
             }
         }
+
+        cleanupResources();
     }
 
-    private void validateCommandWithParam(String[] command) {
-        if (command == null || command.length < 2) {
-            writeError("Command missing parameters");
+    private void cleanupResources() {
+        // tODO: stub
+    }
+
+    private void handlePwd() {
+        try {
+            write(257, fileManager.getPwd() + " is the current working directory.");
+        } catch (IOException e) {
+            writeError("Error retrieving current diretory");
+            e.printStackTrace();
+        }
+    }
+
+    private void handleCwd(String newDirectory) {
+        try {
+            String directory = fileManager.switchDirectory(newDirectory);
+            write(250, "OK. New directory is " + directory);
+        } catch (IOException e) {
+            writeError("Error retrieving current diretory");
+            e.printStackTrace();
+        }
+    }
+
+    private void validateCommandWithParam(String[] commands) throws CommandMissingParamsException {
+        if (commands == null || commands.length < 2) {
+            throw new CommandMissingParamsException();
         }
     }
 
@@ -173,11 +203,13 @@ public class ClientHandler implements Runnable {
         write(STATUS_NOT_IMPLEMENTED, errorMessage);
     }
 
-    private void sendFileList() {
+    private void handlListFiles() {
+        initiateDataConnection();
+
         if (dataConnectionSocket != null && dataConnectionSocket.isConnected()) {
             try {
                 PrintWriter writer = new PrintWriter(this.dataConnectionSocket.getOutputStream());
-                for (String currFile : cwd.list()) {
+                for (String currFile : fileManager.listFiles()) {
                     writer.write(currFile);
                     writer.write(0x0d);
                     writer.write(0x0a);
@@ -241,7 +273,6 @@ public class ClientHandler implements Runnable {
 
     @Override
     public void run() {
-        sayHello();
         commandLoop();
     }
 }

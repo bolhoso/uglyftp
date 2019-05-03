@@ -1,5 +1,6 @@
 package com.bubbleftp;
 
+// TODO: add lombok
 public class LoginHandler {
     private static final String SECRET_PASS = "mypass";
     private static final String SECRET_USER = "bolhoso";
