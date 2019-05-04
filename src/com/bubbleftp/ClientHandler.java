@@ -4,12 +4,15 @@ import com.bubbleftp.exception.CommandMissingParamsException;
 
 import java.io.*;
 import java.net.Socket;
+import java.nio.file.NoSuchFileException;
 import java.util.StringTokenizer;
 
+import static com.bubbleftp.ConnectionManager.ResultCode.*;
+
+import com.bubbleftp.ConnectionManager.ResultCode;
+
 public class ClientHandler implements Runnable {
-    private static final int STATUS_OK = 220;
-    private static final int STATUS_FINISH = 221;
-    private static final int STATUS_NOT_IMPLEMENTED = 502;
+
 
     private static final String COMMAND_PARAM_DELIM = " ";
     private static final String COMMAND_QUIT = "QUIT";
@@ -23,28 +26,14 @@ public class ClientHandler implements Runnable {
     private static final String COMMAND_TYPE = "TYPE";
     private static final String COMMAND_RETR = "RETR";
 
-    private static final int STATUS_USER_OK = 331;
-    private static final int STATUS_PASS_OK = 230;
-
-    private Socket clientSocket;
-    private PrintWriter out;
-    private BufferedReader in;
-
-    private Socket dataConnectionSocket;
-    private boolean dataConnectionSet;
-    private String dataConnIp;
-    private int dataConnPort;
-
+    private ConnectionManager connMannager;
     private boolean finished = false;
 
     private LoginHandler loginHandler;
     private FileManager fileManager;
 
     public ClientHandler(Socket socket) throws IOException {
-        clientSocket = socket;
-        out = new PrintWriter(clientSocket.getOutputStream(), true);
-        in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-
+        connMannager = new ConnectionManager(socket);
         loginHandler = new LoginHandler();
         fileManager = new FileManager();
     }
@@ -53,19 +42,13 @@ public class ClientHandler implements Runnable {
         write(STATUS_OK, "Bubble FTP 0.1 ready.");
     }
 
-    private void write(int code, String output) {
-        out.write(new StringBuffer(4 + output.length() + 1)
-                .append(code)
-                .append(" ")
-                .append(output)
-                .append("\n")
-                .toString());
-        out.flush();
+    private void write(ResultCode code, String output) {
+        connMannager.writeControl(code, output);
     }
 
     private String[] readCommand() throws IOException {
-        String command = in.readLine();
-        System.out.println("DEBUG received " + command);
+        String command = connMannager.readLine();
+        System.out.println("DEBUG received " + command); // TODO use log4j
 
         if (command != null) {
             StringTokenizer tokenizer = new StringTokenizer(command, COMMAND_PARAM_DELIM);
@@ -91,7 +74,7 @@ public class ClientHandler implements Runnable {
                 switch (command[0]) {
                     case "":
                     case COMMAND_QUIT:
-                        write(STATUS_FINISH, "See ya!");
+                        write(ConnectionManager.ResultCode.STATUS_FINISH, "See ya!");
                         finished = true;
                         break;
 
@@ -106,7 +89,7 @@ public class ClientHandler implements Runnable {
                         break;
 
                     case COMMAND_SYST:
-                        write(215, "UNIX Type: L8");
+                        write(ResultCode.STATUS_SYSTEM_TYPE, "UNIX Type: L8");
                         break;
 
 
@@ -157,7 +140,7 @@ public class ClientHandler implements Runnable {
 
     private void handlePwd() {
         try {
-            write(257, fileManager.getPwd() + " is the current working directory.");
+            write(STATUS_PWD_OK, fileManager.getPwd() + " is the current working directory.");
         } catch (IOException e) {
             writeError("Error retrieving current diretory");
             e.printStackTrace();
@@ -167,7 +150,9 @@ public class ClientHandler implements Runnable {
     private void handleCwd(String newDirectory) {
         try {
             String directory = fileManager.switchDirectory(newDirectory);
-            write(250, "OK. New directory is " + directory);
+            write(STATUS_CWD_OK, "OK. New directory is " + directory);
+        } catch (NoSuchFileException e) {
+            writeError("Unknown directory " + e.getFile());
         } catch (IOException e) {
             writeError("Error retrieving current diretory");
             e.printStackTrace();
@@ -196,53 +181,29 @@ public class ClientHandler implements Runnable {
         loginHandler.setUser(user);
 
         write(STATUS_USER_OK, "Password please for " + user);
-
     }
 
     private void writeError(String errorMessage) {
         write(STATUS_NOT_IMPLEMENTED, errorMessage);
     }
 
+    // TODO: Where's the right place for this?
     private void handlListFiles() {
-        initiateDataConnection();
+        try {
+            connMannager.openDataConnection();
 
-        if (dataConnectionSocket != null && dataConnectionSocket.isConnected()) {
-            try {
-                PrintWriter writer = new PrintWriter(this.dataConnectionSocket.getOutputStream());
-                for (String currFile : fileManager.listFiles()) {
-                    writer.write(currFile);
-                    writer.write(0x0d);
-                    writer.write(0x0a);
-                }
-                writer.flush();
-                dataConnectionSocket.close();
-                write(226, "Directory list has been submitted.");
-            } catch (IOException e) {
-                write(STATUS_NOT_IMPLEMENTED, "Error creating data connection with client DTP");
-                e.printStackTrace();
+            for (String currFile : fileManager.listFiles()) {
+                connMannager.writeData(currFile.getBytes());
+                connMannager.writeData(new byte[] {0x0D, 0x0A});
             }
 
-        } else {
-            write(STATUS_NOT_IMPLEMENTED, "Data connection not opened");
-        }
-    }
-
-    private void initiateDataConnection() {
-        if (!dataConnectionSet) {
-            write(STATUS_NOT_IMPLEMENTED, "Data connection params not set");
-            return;
-        }
-
-        try {
-            this.dataConnectionSocket = new Socket(dataConnIp.toString(), dataConnPort);
-            write(150, "BINARY data connection established.");
+            connMannager.closeDataConnection();
+            connMannager.writeControl(STATUS_LS_OK, "Directory list has been submitted.");
 
         } catch (IOException e) {
-            write(STATUS_NOT_IMPLEMENTED, "Error establishing data connection with client DTP");
-
+            write(STATUS_NOT_IMPLEMENTED, "Error creating data connection with client DTP");
             e.printStackTrace();
         }
-
     }
 
     private void configureDataConnection(String userDataPort) {
@@ -265,10 +226,8 @@ public class ClientHandler implements Runnable {
         port = Integer.parseInt(ipPortTokenizer.nextToken()) << 8;
         port |= Integer.parseInt(ipPortTokenizer.nextToken());
 
-        this.dataConnectionSet = true;
-        this.dataConnIp = ip.toString();
-        this.dataConnPort = port;
-        write(200, "PORT " + userDataPort);
+        this.connMannager.setDataConnectionParams(ip.toString(), port);
+        write(STATUS_PORT_OK, "PORT " + userDataPort);
     }
 
     @Override
